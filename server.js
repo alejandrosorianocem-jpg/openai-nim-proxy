@@ -33,7 +33,7 @@ const MODEL_MAPPING = {
   'claude-3-sonnet': 'openai/gpt-oss-20b',
   'gemini-pro': 'qwen/qwen3-next-80b-a3b-thinking',
   'glm-4': 'zhipuai/glm-4-9b-chat',
-  'glm-7': 'meta/llama-3.1-70b-instruct'
+  'glm-7': 'zai-org/GLM-4.7'
 };
 
 // Health check endpoint
