@@ -18,7 +18,7 @@ const NIM_API_KEY = process.env.NIM_API_KEY;
 const SHOW_REASONING = false; // Set to true to show reasoning with <think> tags
 
 // 🔥 THINKING MODE TOGGLE - Enables thinking for specific models that support it
-const ENABLE_THINKING_MODE = true; // Set to true to enable chat_template_kwargs thinking parameter
+const ENABLE_THINKING_MODE = false; // Set to true to enable chat_template_kwargs thinking parameter
 
 // Model mapping (adjust based on available NIM models)
 const MODEL_MAPPING = {
@@ -91,24 +91,10 @@ app.post('/v1/chat/completions', async (req, res) => {
       }
     }
     
-    // Add thinking prefill for models that support it
-    let processedMessages = [...messages];
-    if (ENABLE_THINKING_MODE) {
-      // Check if last message is from user
-      const lastMessage = processedMessages[processedMessages.length - 1];
-      if (lastMessage && lastMessage.role === 'user') {
-        // Add assistant prefill to trigger thinking
-        processedMessages.push({
-          role: 'assistant',
-          content: '<think>'
-        });
-      }
-    }
-    
     // Transform OpenAI request to NIM format
     const nimRequest = {
       model: nimModel,
-      messages: processedMessages,
+      messages: messages,
       temperature: temperature || 0.6,
       max_tokens: max_tokens || (ENABLE_THINKING_MODE ? 3000 : 9024),
       extra_body: ENABLE_THINKING_MODE ? { chat_template_kwargs: { thinking: true } } : undefined,
