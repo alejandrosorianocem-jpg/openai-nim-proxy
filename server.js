@@ -18,7 +18,14 @@ const NIM_API_KEY = process.env.NIM_API_KEY;
 const SHOW_REASONING = false; // Set to true to show reasoning with <think> tags
 
 // 🔥 THINKING MODE TOGGLE - Enables thinking for specific models that support it
-const ENABLE_THINKING_MODE = true; // Set to true to enable chat_template_kwargs thinking parameter
+const ENABLE_THINKING_MODE = false; // Set to true to enable thinking parameter
+
+// Models that use different thinking parameters
+const THINKING_MODELS_CONFIG = {
+  'zai-org/GLM-4.7': { enable_thinking: true, clear_thinking: false }, // GLM-4.7 format
+  'qwen/qwen3-next-80b-a3b-thinking': { thinking: true }, // Qwen format
+  'deepseek-ai/deepseek-v3.1': { thinking: true } // DeepSeek format
+};
 
 // Model mapping (adjust based on available NIM models)
 const MODEL_MAPPING = {
@@ -91,13 +98,25 @@ app.post('/v1/chat/completions', async (req, res) => {
       }
     }
     
+    // Determine thinking configuration for the model
+    let thinkingConfig = undefined;
+    if (ENABLE_THINKING_MODE) {
+      // Check if this specific model has a custom thinking config
+      if (THINKING_MODELS_CONFIG[nimModel]) {
+        thinkingConfig = THINKING_MODELS_CONFIG[nimModel];
+      } else {
+        // Default thinking config for models that support it
+        thinkingConfig = { thinking: true };
+      }
+    }
+    
     // Transform OpenAI request to NIM format
     const nimRequest = {
       model: nimModel,
       messages: messages,
       temperature: temperature || 0.6,
       max_tokens: max_tokens || (ENABLE_THINKING_MODE ? 3000 : 9024),
-      extra_body: ENABLE_THINKING_MODE ? { chat_template_kwargs: { thinking: true } } : undefined,
+      extra_body: thinkingConfig ? { chat_template_kwargs: thinkingConfig } : undefined,
       stream: stream || ENABLE_THINKING_MODE // Force streaming when thinking mode is active
     };
     
