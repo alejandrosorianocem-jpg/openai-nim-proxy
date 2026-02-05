@@ -15,10 +15,13 @@ const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.c
 const NIM_API_KEY = process.env.NIM_API_KEY;
 
 // 🔥 REASONING DISPLAY TOGGLE - Shows/hides reasoning in output
-const SHOW_REASONING = true; // Set to true to show reasoning with <think> tags
+const SHOW_REASONING = false; // Set to true to show reasoning with <think> tags
 
-// 🔥 THINKING MODE TOGGLE - Enables thinking for specific models that support it
+// 🔥 THINKING MODE TOGGLE - Enables thinking for specific models that support it (QwQ, R1, etc.)
 const ENABLE_THINKING_MODE = false; // Set to true to enable chat_template_kwargs thinking parameter
+
+// 🔥 PREFILL TOGGLE - Forces models to think step-by-step
+const ENABLE_PREFILL = true; // Set to false to disable automatic reasoning prefill
 
 // Model mapping (adjust based on available NIM models)
 const MODEL_MAPPING = {
@@ -28,7 +31,9 @@ const MODEL_MAPPING = {
   'gpt-4o': 'deepseek-ai/deepseek-v3.1',
   'claude-3-opus': 'openai/gpt-oss-120b',
   'claude-3-sonnet': 'openai/gpt-oss-20b',
-  'gemini-pro': 'qwen/qwen3-next-80b-a3b-thinking' 
+  'gemini-pro': 'qwen/qwen3-next-80b-a3b-thinking',
+  'glm-4': 'zhipuai/glm-4-9b-chat',
+  'glm-7': 'meta/llama-3.1-70b-instruct'
 };
 
 // Health check endpoint
@@ -37,7 +42,8 @@ app.get('/health', (req, res) => {
     status: 'ok', 
     service: 'OpenAI to NVIDIA NIM Proxy', 
     reasoning_display: SHOW_REASONING,
-    thinking_mode: ENABLE_THINKING_MODE
+    thinking_mode: ENABLE_THINKING_MODE,
+    prefill_enabled: ENABLE_PREFILL
   });
 });
 
@@ -60,6 +66,24 @@ app.get('/v1/models', (req, res) => {
 app.post('/v1/chat/completions', async (req, res) => {
   try {
     const { model, messages, temperature, max_tokens, stream } = req.body;
+    
+    console.log('📥 Incoming request:', { model, messageCount: messages?.length, stream });
+    
+    // Validate API key
+    if (!NIM_API_KEY) {
+      console.error('❌ NIM_API_KEY not set');
+      return res.status(500).json({
+        error: { message: 'NIM_API_KEY environment variable not set', type: 'configuration_error', code: 500 }
+      });
+    }
+    
+    // Validate messages
+    if (!messages || !Array.isArray(messages) || messages.length === 0) {
+      console.error('❌ Invalid messages format');
+      return res.status(400).json({
+        error: { message: 'Messages must be a non-empty array', type: 'invalid_request_error', code: 400 }
+      });
+    }
     
     // Smart model selection with fallback
     let nimModel = MODEL_MAPPING[model];
@@ -91,15 +115,44 @@ app.post('/v1/chat/completions', async (req, res) => {
       }
     }
     
+    console.log('🔄 Model mapping:', model, '→', nimModel);
+    
+    // Apply prefill if enabled
+    let processedMessages = [...messages];
+    if (ENABLE_PREFILL) {
+      // Add system message if not present
+      if (processedMessages[0]?.role !== 'system') {
+        processedMessages.unshift({
+          role: 'system',
+          content: 'You are a helpful AI assistant. Always think through problems step-by-step before answering. Show your reasoning when relevant.'
+        });
+      }
+      
+      // Add assistant prefill to trigger reasoning
+      processedMessages.push({
+        role: 'assistant',
+        content: 'Let me think through this carefully:\n\n'
+      });
+      
+      console.log('✨ Prefill applied');
+    }
+    
     // Transform OpenAI request to NIM format
     const nimRequest = {
       model: nimModel,
-      messages: messages,
-      temperature: temperature || 0.6,
-      max_tokens: max_tokens || 9024,
-      extra_body: ENABLE_THINKING_MODE ? { chat_template_kwargs: { thinking: true } } : undefined,
+      messages: processedMessages,
+      temperature: temperature !== undefined ? temperature : 0.7,
+      top_p: 0.9,
+      max_tokens: max_tokens || 1024,
       stream: stream || false
     };
+    
+    // Only add extra_body if thinking mode is enabled (for specific models)
+    if (ENABLE_THINKING_MODE) {
+      nimRequest.extra_body = { chat_template_kwargs: { thinking: true } };
+    }
+    
+    console.log('📤 Sending to NIM:', { model: nimRequest.model, max_tokens: nimRequest.max_tokens });
     
     // Make request to NVIDIA NIM API
     const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
@@ -109,6 +162,8 @@ app.post('/v1/chat/completions', async (req, res) => {
       },
       responseType: stream ? 'stream' : 'json'
     });
+    
+    console.log('✅ NIM response received');
     
     if (stream) {
       // Handle streaming response with reasoning
@@ -214,13 +269,26 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
     
   } catch (error) {
-    console.error('Proxy error:', error.message);
+    console.error('❌ Proxy error:', error.message);
+    console.error('📋 Error details:', {
+      status: error.response?.status,
+      statusText: error.response?.statusText,
+      data: error.response?.data,
+      model: error.config?.data ? JSON.parse(error.config.data).model : 'unknown'
+    });
+    
+    // Enhanced error response
+    const errorMessage = error.response?.data?.detail || 
+                        error.response?.data?.error?.message || 
+                        error.message || 
+                        'Internal server error';
     
     res.status(error.response?.status || 500).json({
       error: {
-        message: error.message || 'Internal server error',
+        message: `NIM API Error: ${errorMessage}`,
         type: 'invalid_request_error',
-        code: error.response?.status || 500
+        code: error.response?.status || 500,
+        details: error.response?.data
       }
     });
   }
@@ -242,4 +310,5 @@ app.listen(PORT, () => {
   console.log(`Health check: http://localhost:${PORT}/health`);
   console.log(`Reasoning display: ${SHOW_REASONING ? 'ENABLED' : 'DISABLED'}`);
   console.log(`Thinking mode: ${ENABLE_THINKING_MODE ? 'ENABLED' : 'DISABLED'}`);
+  console.log(`Prefill mode: ${ENABLE_PREFILL ? 'ENABLED' : 'DISABLED'}`);
 });
