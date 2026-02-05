@@ -110,9 +110,9 @@ app.post('/v1/chat/completions', async (req, res) => {
       model: nimModel,
       messages: processedMessages,
       temperature: temperature || 0.6,
-      max_tokens: max_tokens || 9024,
+      max_tokens: max_tokens || (ENABLE_THINKING_MODE ? 3000 : 9024),
       extra_body: ENABLE_THINKING_MODE ? { chat_template_kwargs: { thinking: true } } : undefined,
-      stream: stream || false
+      stream: stream || ENABLE_THINKING_MODE // Force streaming when thinking mode is active
     };
     
     // Make request to NVIDIA NIM API
