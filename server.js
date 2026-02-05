@@ -61,15 +61,54 @@ app.post('/v1/chat/completions', async (req, res) => {
   try {
     const { model, messages, temperature, max_tokens, stream } = req.body;
     
-    // Smart model selection: Use requested model directly, with optional mapping
-    let nimModel = MODEL_MAPPING[model] || model; // Use mapping if exists, otherwise use model name as-is
+    // Smart model selection with fallback
+    let nimModel = MODEL_MAPPING[model];
+    if (!nimModel) {
+      try {
+        await axios.post(`${NIM_API_BASE}/chat/completions`, {
+          model: model,
+          messages: [{ role: 'user', content: 'test' }],
+          max_tokens: 1
+        }, {
+          headers: { 'Authorization': `Bearer ${NIM_API_KEY}`, 'Content-Type': 'application/json' },
+          validateStatus: (status) => status < 500
+        }).then(res => {
+          if (res.status >= 200 && res.status < 300) {
+            nimModel = model;
+          }
+        });
+      } catch (e) {}
+      
+      if (!nimModel) {
+        const modelLower = model.toLowerCase();
+        if (modelLower.includes('gpt-4') || modelLower.includes('claude-opus') || modelLower.includes('405b')) {
+          nimModel = 'meta/llama-3.1-405b-instruct';
+        } else if (modelLower.includes('claude') || modelLower.includes('gemini') || modelLower.includes('70b')) {
+          nimModel = 'meta/llama-3.1-70b-instruct';
+        } else {
+          nimModel = 'meta/llama-3.1-8b-instruct';
+        }
+      }
+    }
     
-    console.log(`🎯 Model selection: ${model === nimModel ? 'Direct' : 'Mapped'}`)
+    // Add thinking prefill for models that support it
+    let processedMessages = [...messages];
+    if (ENABLE_THINKING_MODE) {
+      // Check if last message is from user
+      const lastMessage = processedMessages[processedMessages.length - 1];
+      if (lastMessage && lastMessage.role === 'user') {
+        // Add assistant prefill to trigger thinking
+        processedMessages.push({
+          role: 'assistant',
+          content: '<think>'
+        });
+      }
+    }
     
     // Transform OpenAI request to NIM format
     const nimRequest = {
       model: nimModel,
-      messages: messages,
+      messages: processedMessages,
       temperature: temperature || 0.6,
       max_tokens: max_tokens || 9024,
       extra_body: ENABLE_THINKING_MODE ? { chat_template_kwargs: { thinking: true } } : undefined,
