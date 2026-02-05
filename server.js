@@ -18,11 +18,11 @@ const NIM_API_KEY = process.env.NIM_API_KEY;
 const SHOW_REASONING = false; // Set to true to show reasoning with <think> tags
 
 // 🔥 THINKING MODE TOGGLE - Enables thinking for specific models that support it
-const ENABLE_THINKING_MODE = true; // Set to true to enable thinking parameter
+const ENABLE_THINKING_MODE = false; // Set to true to enable thinking parameter
 
 // Models that use different thinking parameters
 const THINKING_MODELS_CONFIG = {
-  'zai-org/GLM-4.7': { enable_thinking: true, clear_thinking: false }, // GLM-4.7 format
+  'zai-org/GLM-4.7': { type: 'enabled' }, // GLM-4.7 uses "thinking.type" format
   'qwen/qwen3-next-80b-a3b-thinking': { thinking: true }, // Qwen format
   'deepseek-ai/deepseek-v3.1': { thinking: true } // DeepSeek format
 };
@@ -99,14 +99,20 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
     
     // Determine thinking configuration for the model
-    let thinkingConfig = undefined;
+    let thinkingParam = undefined;
     if (ENABLE_THINKING_MODE) {
       // Check if this specific model has a custom thinking config
       if (THINKING_MODELS_CONFIG[nimModel]) {
-        thinkingConfig = THINKING_MODELS_CONFIG[nimModel];
+        // GLM-4.7 needs "thinking" as a top-level parameter, not inside chat_template_kwargs
+        if (nimModel === 'zai-org/GLM-4.7') {
+          // Special handling for GLM-4.7 - will be added to request body directly
+          thinkingParam = 'glm';
+        } else {
+          thinkingParam = THINKING_MODELS_CONFIG[nimModel];
+        }
       } else {
         // Default thinking config for models that support it
-        thinkingConfig = { thinking: true };
+        thinkingParam = { thinking: true };
       }
     }
     
@@ -116,9 +122,17 @@ app.post('/v1/chat/completions', async (req, res) => {
       messages: messages,
       temperature: temperature || 0.6,
       max_tokens: max_tokens || (ENABLE_THINKING_MODE ? 3000 : 9024),
-      extra_body: thinkingConfig ? { chat_template_kwargs: thinkingConfig } : undefined,
       stream: stream || ENABLE_THINKING_MODE // Force streaming when thinking mode is active
     };
+    
+    // Add thinking parameter based on model type
+    if (thinkingParam === 'glm') {
+      // GLM-4.7 uses top-level "thinking" parameter
+      nimRequest.thinking = { type: 'enabled' };
+    } else if (thinkingParam) {
+      // Other models use chat_template_kwargs
+      nimRequest.extra_body = { chat_template_kwargs: thinkingParam };
+    }
     
     // Make request to NVIDIA NIM API
     const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
