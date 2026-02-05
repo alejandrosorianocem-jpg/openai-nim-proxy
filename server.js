@@ -30,7 +30,7 @@ const MODEL_MAPPING = {
   'claude-3-sonnet': 'openai/gpt-oss-20b',
   'gemini-pro': 'qwen/qwen3-next-80b-a3b-thinking',
   // Thinking-specific models
-  'glm-4.7': 'zhipu/glm-4-plus',
+  'glm-4.7': 'zai-org/GLM-4.7',
   'qwq': 'qwen/qwq-32b-preview',
   'deepseek-r1': 'deepseek-ai/deepseek-r1',
   'thinking': 'qwen/qwen3-next-80b-a3b-thinking'
