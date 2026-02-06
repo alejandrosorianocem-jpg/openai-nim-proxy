@@ -6,6 +6,13 @@ const axios = require('axios');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// ⚠️ CRITICAL: Increase timeouts for reasoning models (can take 60+ seconds)
+app.use((req, res, next) => {
+  req.setTimeout(600000); // 10 minutes
+  res.setTimeout(600000); // 10 minutes
+  next();
+});
+
 // Middleware
 app.use(cors());
 app.use(express.json());
@@ -18,10 +25,7 @@ const NIM_API_KEY = process.env.NIM_API_KEY;
 const SHOW_REASONING = false; // Set to true to show reasoning with <think> tags
 
 // 🔥 THINKING MODE TOGGLE - Enables thinking for specific models that support it (QwQ, R1, etc.)
-const ENABLE_THINKING_MODE = true; // Set to true to enable chat_template_kwargs thinking parameter
-
-// 🔥 PREFILL TOGGLE - Forces models to think step-by-step
-const ENABLE_PREFILL = true; // Set to false to disable automatic reasoning prefill
+const ENABLE_THINKING_MODE = false; // Set to true to enable chat_template_kwargs thinking parameter
 
 // Model mapping (adjust based on available NIM models)
 const MODEL_MAPPING = {
@@ -43,7 +47,7 @@ app.get('/health', (req, res) => {
     service: 'OpenAI to NVIDIA NIM Proxy', 
     reasoning_display: SHOW_REASONING,
     thinking_mode: ENABLE_THINKING_MODE,
-    prefill_enabled: ENABLE_PREFILL
+    timeout: '10 minutes for reasoning models'
   });
 });
 
@@ -101,33 +105,13 @@ app.post('/v1/chat/completions', async (req, res) => {
     
     console.log('🔄 Using model:', nimModel);
     
-    // Apply prefill if enabled
-    let processedMessages = [...messages];
-    if (ENABLE_PREFILL) {
-      // Add system message if not present
-      if (processedMessages[0]?.role !== 'system') {
-        processedMessages.unshift({
-          role: 'system',
-          content: 'You are a helpful AI assistant. Always think through problems step-by-step before answering. Show your reasoning when relevant.'
-        });
-      }
-      
-      // Add assistant prefill to trigger reasoning
-      processedMessages.push({
-        role: 'assistant',
-        content: 'Let me think through this carefully:\n\n'
-      });
-      
-      console.log('✨ Prefill applied');
-    }
-    
     // Transform OpenAI request to NIM format
     const nimRequest = {
       model: nimModel,
-      messages: processedMessages,
+      messages: messages,
       temperature: temperature !== undefined ? temperature : 0.7,
       top_p: 0.9,
-      max_tokens: max_tokens || 1024,
+      max_tokens: max_tokens || 2048,
       stream: stream || false
     };
     
@@ -138,13 +122,16 @@ app.post('/v1/chat/completions', async (req, res) => {
     
     console.log('📤 Sending to NIM:', { model: nimRequest.model, max_tokens: nimRequest.max_tokens });
     
-    // Make request to NVIDIA NIM API
+    // Make request to NVIDIA NIM API with extended timeout for reasoning models
     const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
       headers: {
         'Authorization': `Bearer ${NIM_API_KEY}`,
         'Content-Type': 'application/json'
       },
-      responseType: stream ? 'stream' : 'json'
+      responseType: stream ? 'stream' : 'json',
+      timeout: 300000, // 5 minutes timeout for reasoning models
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity
     });
     
     console.log('✅ NIM response received');
@@ -154,6 +141,12 @@ app.post('/v1/chat/completions', async (req, res) => {
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering
+      
+      // Send keepalive every 15 seconds to prevent timeout
+      const keepaliveInterval = setInterval(() => {
+        res.write(':keepalive\n\n');
+      }, 15000);
       
       let buffer = '';
       let reasoningStarted = false;
@@ -214,9 +207,14 @@ app.post('/v1/chat/completions', async (req, res) => {
         });
       });
       
-      response.data.on('end', () => res.end());
+      response.data.on('end', () => {
+        clearInterval(keepaliveInterval);
+        res.end();
+      });
+      
       response.data.on('error', (err) => {
         console.error('Stream error:', err);
+        clearInterval(keepaliveInterval);
         res.end();
       });
     } else {
@@ -294,5 +292,5 @@ app.listen(PORT, () => {
   console.log(`Health check: http://localhost:${PORT}/health`);
   console.log(`Reasoning display: ${SHOW_REASONING ? 'ENABLED' : 'DISABLED'}`);
   console.log(`Thinking mode: ${ENABLE_THINKING_MODE ? 'ENABLED' : 'DISABLED'}`);
-  console.log(`Prefill mode: ${ENABLE_PREFILL ? 'ENABLED' : 'DISABLED'}`);
+  console.log(`Timeouts: 10min server, 5min axios, 15s keepalive for reasoning models`);
 });
