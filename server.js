@@ -6,6 +6,13 @@ const axios = require('axios');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Increase timeouts for slow models
+app.use((req, res, next) => {
+  req.setTimeout(300000); // 5 minutes
+  res.setTimeout(300000); // 5 minutes
+  next();
+});
+
 // Middleware
 app.use(cors());
 app.use(express.json());
@@ -17,21 +24,20 @@ const NIM_API_KEY = process.env.NIM_API_KEY;
 // 🔥 REASONING DISPLAY TOGGLE - Shows/hides reasoning in output
 const SHOW_REASONING = false; // Set to true to show reasoning with <think> tags
 
-// 🔥 THINKING MODE TOGGLE - Enables thinking for specific models that support it
-const ENABLE_THINKING_MODE = true; // Set to true to enable thinking parameter
+// 🔥 THINKING MODE TOGGLE - Only for specific models that support it
+const ENABLE_THINKING_MODE = false; // Set to true ONLY for QwQ and similar models
 
-// Models that use different thinking parameters
-const THINKING_MODELS_CONFIG = {
-  'zai-org/GLM-4.7': { type: 'enabled' }, // GLM-4.7 uses "thinking.type" format
-  'qwen/qwen3-next-80b-a3b-thinking': { thinking: true }, // Qwen format
-  'deepseek-ai/deepseek-v3.1': { thinking: true } // DeepSeek format
-};
+// 🔥 Models that support thinking parameter
+const THINKING_MODELS = [
+  'qwen/qwen3-next-80b-a3b-thinking',
+  'qwen/qwq-32b-preview'
+];
 
 // Model mapping (adjust based on available NIM models)
 const MODEL_MAPPING = {
   'gpt-3.5-turbo': 'nvidia/llama-3.1-nemotron-ultra-253b-v1',
   'gpt-4': 'qwen/qwen3-coder-480b-a35b-instruct',
-  'gpt-4-turbo': 'moonshotai/kimi-k2-instruct-0905',
+  'gpt-4-turbo': 'moonshotai/kimi-k2.5-instruct',
   'gpt-4o': 'deepseek-ai/deepseek-v3.1',
   'claude-3-opus': 'openai/gpt-oss-120b',
   'claude-3-sonnet': 'openai/gpt-oss-20b',
@@ -98,40 +104,22 @@ app.post('/v1/chat/completions', async (req, res) => {
       }
     }
     
-    // Determine thinking configuration for the model
-    let thinkingParam = undefined;
-    if (ENABLE_THINKING_MODE) {
-      // Check if this specific model has a custom thinking config
-      if (THINKING_MODELS_CONFIG[nimModel]) {
-        // GLM-4.7 needs "thinking" as a top-level parameter, not inside chat_template_kwargs
-        if (nimModel === 'zai-org/GLM-4.7') {
-          // Special handling for GLM-4.7 - will be added to request body directly
-          thinkingParam = 'glm';
-        } else {
-          thinkingParam = THINKING_MODELS_CONFIG[nimModel];
-        }
-      } else {
-        // Default thinking config for models that support it
-        thinkingParam = { thinking: true };
-      }
-    }
-    
     // Transform OpenAI request to NIM format
+    // Only add thinking parameter if model supports it AND it's enabled
+    const supportsThinking = THINKING_MODELS.includes(nimModel);
+    
     const nimRequest = {
       model: nimModel,
       messages: messages,
       temperature: temperature || 0.6,
-      max_tokens: max_tokens || (ENABLE_THINKING_MODE ? 3000 : 9024),
-      stream: stream || ENABLE_THINKING_MODE // Force streaming when thinking mode is active
+      max_tokens: max_tokens || 9024,
+      stream: stream || false,
+      timeout: 120000 // 120 seconds timeout for slow models
     };
     
-    // Add thinking parameter based on model type
-    if (thinkingParam === 'glm') {
-      // GLM-4.7 uses top-level "thinking" parameter
-      nimRequest.thinking = { type: 'enabled' };
-    } else if (thinkingParam) {
-      // Other models use chat_template_kwargs
-      nimRequest.extra_body = { chat_template_kwargs: thinkingParam };
+    // Add thinking parameter only for compatible models
+    if (ENABLE_THINKING_MODE && supportsThinking) {
+      nimRequest.extra_body = { chat_template_kwargs: { thinking: true } };
     }
     
     // Make request to NVIDIA NIM API
@@ -140,7 +128,10 @@ app.post('/v1/chat/completions', async (req, res) => {
         'Authorization': `Bearer ${NIM_API_KEY}`,
         'Content-Type': 'application/json'
       },
-      responseType: stream ? 'stream' : 'json'
+      responseType: stream ? 'stream' : 'json',
+      timeout: 120000, // 120 second timeout
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity
     });
     
     if (stream) {
@@ -153,6 +144,9 @@ app.post('/v1/chat/completions', async (req, res) => {
       let reasoningStarted = false;
       
       response.data.on('data', (chunk) => {
+        // Send keepalive to prevent Render timeout
+        res.write(':keepalive\n\n');
+        
         buffer += chunk.toString();
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
@@ -275,4 +269,5 @@ app.listen(PORT, () => {
   console.log(`Health check: http://localhost:${PORT}/health`);
   console.log(`Reasoning display: ${SHOW_REASONING ? 'ENABLED' : 'DISABLED'}`);
   console.log(`Thinking mode: ${ENABLE_THINKING_MODE ? 'ENABLED' : 'DISABLED'}`);
+  console.log(`Timeout configured: 5 minutes for slow models`);
 });
