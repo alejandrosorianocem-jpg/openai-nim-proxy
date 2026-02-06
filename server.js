@@ -24,6 +24,12 @@ const NIM_API_KEY = process.env.NIM_API_KEY;
 // 🔥 REASONING DISPLAY TOGGLE - Shows/hides reasoning in output
 const SHOW_REASONING = false; // Set to true to show reasoning with <think> tags
 
+// 🔥 Models that require special content format (array of objects)
+const ARRAY_CONTENT_MODELS = [
+  'moonshotai/kimi-k2.5-instruct',
+  'moonshotai/kimi-k2-instruct-0905'
+];
+
 // 🔥 THINKING MODE TOGGLE - Only for specific models that support it
 const ENABLE_THINKING_MODE = false; // Set to true ONLY for QwQ and similar models
 
@@ -104,23 +110,49 @@ app.post('/v1/chat/completions', async (req, res) => {
       }
     }
     
+    // 🔥 Smart message format conversion based on model requirements
+    const requiresArrayFormat = ARRAY_CONTENT_MODELS.some(m => nimModel.includes(m.split('/')[1]));
+    
+    const transformedMessages = messages.map(msg => {
+      // Convert to array format for models that require it (like Kimi)
+      if (requiresArrayFormat && typeof msg.content === 'string') {
+        return {
+          ...msg,
+          content: [{ type: 'text', text: msg.content }]
+        };
+      }
+      // Convert from array format for models that don't support it
+      if (!requiresArrayFormat && Array.isArray(msg.content)) {
+        const textContent = msg.content
+          .filter(item => item.type === 'text')
+          .map(item => item.text)
+          .join('\n');
+        return {
+          ...msg,
+          content: textContent
+        };
+      }
+      return msg;
+    });
+    
     // Transform OpenAI request to NIM format
     // Only add thinking parameter if model supports it AND it's enabled
     const supportsThinking = THINKING_MODELS.includes(nimModel);
     
     const nimRequest = {
       model: nimModel,
-      messages: messages,
+      messages: transformedMessages,
       temperature: temperature || 0.6,
       max_tokens: max_tokens || 9024,
-      stream: stream || false,
-      timeout: 120000 // 120 seconds timeout for slow models
+      stream: stream || false
     };
     
     // Add thinking parameter only for compatible models
     if (ENABLE_THINKING_MODE && supportsThinking) {
       nimRequest.extra_body = { chat_template_kwargs: { thinking: true } };
     }
+    
+    console.log(`Using model: ${nimModel} for request`);
     
     // Make request to NVIDIA NIM API
     const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
@@ -242,10 +274,14 @@ app.post('/v1/chat/completions', async (req, res) => {
     
   } catch (error) {
     console.error('Proxy error:', error.message);
+    if (error.response?.data) {
+      console.error('NVIDIA API error details:', JSON.stringify(error.response.data));
+    }
+    console.error('Request model was:', req.body.model);
     
     res.status(error.response?.status || 500).json({
       error: {
-        message: error.message || 'Internal server error',
+        message: error.response?.data?.detail || error.message || 'Internal server error',
         type: 'invalid_request_error',
         code: error.response?.status || 500
       }
