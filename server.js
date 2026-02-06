@@ -6,13 +6,6 @@ const axios = require('axios');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Increase timeouts for slow models
-app.use((req, res, next) => {
-  req.setTimeout(300000);
-  res.setTimeout(300000);
-  next();
-});
-
 // Middleware
 app.use(cors());
 app.use(express.json());
@@ -21,41 +14,26 @@ app.use(express.json());
 const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
 const NIM_API_KEY = process.env.NIM_API_KEY;
 
-// Cache for validated models
-const validatedModels = new Set();
+// 🔥 REASONING DISPLAY TOGGLE - Shows/hides reasoning in output
+const SHOW_REASONING = false; // Set to true to show reasoning with <think> tags
 
-// REASONING DISPLAY TOGGLE
-const SHOW_REASONING = true;
+// 🔥 THINKING MODE TOGGLE - Enables thinking for specific models that support it (QwQ, R1, etc.)
+const ENABLE_THINKING_MODE = true; // Set to true to enable chat_template_kwargs thinking parameter
 
-// Models that require special content format
-const ARRAY_CONTENT_MODELS = [
-  'moonshotai/kimi-k2.5-instruct',
-  'moonshotai/kimi-k2-instruct-0905'
-];
+// 🔥 PREFILL TOGGLE - Forces models to think step-by-step
+const ENABLE_PREFILL = true; // Set to false to disable automatic reasoning prefill
 
-// THINKING MODE TOGGLE
-const ENABLE_THINKING_MODE = false;
-
-// Models that support thinking parameter
-const THINKING_MODELS = [
-  'qwen/qwen3-next-80b-a3b-thinking',
-  'qwen/qwq-32b-preview'
-];
-
-// Model mapping
+// Model mapping (adjust based on available NIM models)
 const MODEL_MAPPING = {
   'gpt-3.5-turbo': 'nvidia/llama-3.1-nemotron-ultra-253b-v1',
   'gpt-4': 'qwen/qwen3-coder-480b-a35b-instruct',
-  'gpt-4-turbo': 'moonshotai/kimi-k2.5-instruct',
-  'gpt-4-turbo-preview': 'moonshotai/kimi-k2.5-instruct',
+  'gpt-4-turbo': 'moonshotai/kimi-k2-instruct-0905',
   'gpt-4o': 'deepseek-ai/deepseek-v3.1',
-  'gpt-4o-mini': 'meta/llama-3.1-70b-instruct',
   'claude-3-opus': 'openai/gpt-oss-120b',
   'claude-3-sonnet': 'openai/gpt-oss-20b',
-  'claude-3-5-sonnet': 'openai/gpt-oss-120b',
   'gemini-pro': 'qwen/qwen3-next-80b-a3b-thinking',
-  'kimi-k2.5': 'moonshotai/kimi-k2.5-instruct',
-  'kimi': 'moonshotai/kimi-k2.5-instruct'
+  'glm-4': 'zhipuai/glm-4-9b-chat',
+  'glm-7': 'meta/llama-3.1-70b-instruct'
 };
 
 // Health check endpoint
@@ -64,11 +42,12 @@ app.get('/health', (req, res) => {
     status: 'ok', 
     service: 'OpenAI to NVIDIA NIM Proxy', 
     reasoning_display: SHOW_REASONING,
-    thinking_mode: ENABLE_THINKING_MODE
+    thinking_mode: ENABLE_THINKING_MODE,
+    prefill_enabled: ENABLE_PREFILL
   });
 });
 
-// List models endpoint
+// List models endpoint (OpenAI compatible)
 app.get('/v1/models', (req, res) => {
   const models = Object.keys(MODEL_MAPPING).map(model => ({
     id: model,
@@ -83,116 +62,95 @@ app.get('/v1/models', (req, res) => {
   });
 });
 
-// Chat completions endpoint
+// Chat completions endpoint (main proxy)
 app.post('/v1/chat/completions', async (req, res) => {
   try {
     const { model, messages, temperature, max_tokens, stream } = req.body;
     
-    console.log(`Received request for model: ${model}`);
+    console.log('📥 Incoming request:', { model, messageCount: messages?.length, stream });
+    
+    // Validate API key
+    if (!NIM_API_KEY) {
+      console.error('❌ NIM_API_KEY not set');
+      return res.status(500).json({
+        error: { message: 'NIM_API_KEY environment variable not set', type: 'configuration_error', code: 500 }
+      });
+    }
+    
+    // Validate messages
+    if (!messages || !Array.isArray(messages) || messages.length === 0) {
+      console.error('❌ Invalid messages format');
+      return res.status(400).json({
+        error: { message: 'Messages must be a non-empty array', type: 'invalid_request_error', code: 400 }
+      });
+    }
+    
+    // Try model in this order:
+    // 1. Check if it's in mapping (for convenience aliases)
+    // 2. Try the model name directly
+    // 3. Only fallback if both fail
     
     let nimModel = MODEL_MAPPING[model];
     
     if (nimModel) {
-      console.log(`Mapped to: ${nimModel}`);
+      console.log('✅ Using mapped model:', model, '→', nimModel);
     } else {
-      console.log(`Model ${model} not in mapping, trying direct...`);
-      
-      if (validatedModels.has(model)) {
-        nimModel = model;
-        console.log(`Using cached validated model: ${model}`);
-      } else {
-        try {
-          const testResponse = await axios.post(`${NIM_API_BASE}/chat/completions`, {
-            model: model,
-            messages: [{ role: 'user', content: 'test' }],
-            max_tokens: 1
-          }, {
-            headers: { 
-              'Authorization': `Bearer ${NIM_API_KEY}`, 
-              'Content-Type': 'application/json' 
-            },
-            timeout: 5000,
-            validateStatus: (status) => status < 500
-          });
-          
-          if (testResponse.status >= 200 && testResponse.status < 300) {
-            nimModel = model;
-            validatedModels.add(model);
-            console.log(`Direct model validated: ${model}`);
-          } else {
-            console.log(`Direct model failed with status: ${testResponse.status}`);
-          }
-        } catch (e) {
-          console.log(`Direct model test failed: ${e.message}`);
-        }
-      }
-      
-      if (!nimModel) {
-        console.log(`Falling back to size-based selection...`);
-        const modelLower = model.toLowerCase();
-        if (modelLower.includes('gpt-4') || modelLower.includes('claude-opus') || modelLower.includes('405b')) {
-          nimModel = 'meta/llama-3.1-405b-instruct';
-          console.log(`Selected 405B model`);
-        } else if (modelLower.includes('claude') || modelLower.includes('gemini') || modelLower.includes('70b')) {
-          nimModel = 'meta/llama-3.1-70b-instruct';
-          console.log(`Selected 70B model`);
-        } else {
-          nimModel = 'meta/llama-3.1-8b-instruct';
-          console.log(`Selected 8B model`);
-        }
-      }
+      console.log('🔍 Model not in mapping, trying direct:', model);
+      nimModel = model; // Use directly first
     }
     
-    const requiresArrayFormat = ARRAY_CONTENT_MODELS.some(m => nimModel.includes(m.split('/')[1]));
+    console.log('🔄 Using model:', nimModel);
     
-    const transformedMessages = messages.map(msg => {
-      if (requiresArrayFormat && typeof msg.content === 'string') {
-        return {
-          ...msg,
-          content: [{ type: 'text', text: msg.content }]
-        };
+    // Apply prefill if enabled
+    let processedMessages = [...messages];
+    if (ENABLE_PREFILL) {
+      // Add system message if not present
+      if (processedMessages[0]?.role !== 'system') {
+        processedMessages.unshift({
+          role: 'system',
+          content: 'You are a helpful AI assistant. Always think through problems step-by-step before answering. Show your reasoning when relevant.'
+        });
       }
-      if (!requiresArrayFormat && Array.isArray(msg.content)) {
-        const textContent = msg.content
-          .filter(item => item.type === 'text')
-          .map(item => item.text)
-          .join('\n');
-        return {
-          ...msg,
-          content: textContent
-        };
-      }
-      return msg;
-    });
+      
+      // Add assistant prefill to trigger reasoning
+      processedMessages.push({
+        role: 'assistant',
+        content: 'Let me think through this carefully:\n\n'
+      });
+      
+      console.log('✨ Prefill applied');
+    }
     
-    const supportsThinking = THINKING_MODELS.includes(nimModel);
-    
+    // Transform OpenAI request to NIM format
     const nimRequest = {
       model: nimModel,
-      messages: transformedMessages,
-      temperature: temperature || 0.6,
-      max_tokens: max_tokens || 9024,
+      messages: processedMessages,
+      temperature: temperature !== undefined ? temperature : 0.7,
+      top_p: 0.9,
+      max_tokens: max_tokens || 1024,
       stream: stream || false
     };
     
-    if (ENABLE_THINKING_MODE && supportsThinking) {
+    // Only add extra_body if thinking mode is enabled (for specific models)
+    if (ENABLE_THINKING_MODE) {
       nimRequest.extra_body = { chat_template_kwargs: { thinking: true } };
     }
     
-    console.log(`Using model: ${nimModel} for request`);
+    console.log('📤 Sending to NIM:', { model: nimRequest.model, max_tokens: nimRequest.max_tokens });
     
+    // Make request to NVIDIA NIM API
     const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
       headers: {
         'Authorization': `Bearer ${NIM_API_KEY}`,
         'Content-Type': 'application/json'
       },
-      responseType: stream ? 'stream' : 'json',
-      timeout: 120000,
-      maxContentLength: Infinity,
-      maxBodyLength: Infinity
+      responseType: stream ? 'stream' : 'json'
     });
     
+    console.log('✅ NIM response received');
+    
     if (stream) {
+      // Handle streaming response with reasoning
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
@@ -201,8 +159,6 @@ app.post('/v1/chat/completions', async (req, res) => {
       let reasoningStarted = false;
       
       response.data.on('data', (chunk) => {
-        res.write(':keepalive\n\n');
-        
         buffer += chunk.toString();
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
@@ -216,7 +172,7 @@ app.post('/v1/chat/completions', async (req, res) => {
             
             try {
               const data = JSON.parse(line.slice(6));
-              if (data.choices && data.choices[0] && data.choices[0].delta) {
+              if (data.choices?.[0]?.delta) {
                 const reasoning = data.choices[0].delta.reasoning_content;
                 const content = data.choices[0].delta.content;
                 
@@ -264,15 +220,16 @@ app.post('/v1/chat/completions', async (req, res) => {
         res.end();
       });
     } else {
+      // Transform NIM response to OpenAI format with reasoning
       const openaiResponse = {
         id: `chatcmpl-${Date.now()}`,
         object: 'chat.completion',
         created: Math.floor(Date.now() / 1000),
         model: model,
         choices: response.data.choices.map(choice => {
-          let fullContent = choice.message ? choice.message.content || '' : '';
+          let fullContent = choice.message?.content || '';
           
-          if (SHOW_REASONING && choice.message && choice.message.reasoning_content) {
+          if (SHOW_REASONING && choice.message?.reasoning_content) {
             fullContent = '<think>\n' + choice.message.reasoning_content + '\n</think>\n\n' + fullContent;
           }
           
@@ -296,17 +253,26 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
     
   } catch (error) {
-    console.error('Proxy error:', error.message);
-    if (error.response && error.response.data) {
-      console.error('NVIDIA API error details:', JSON.stringify(error.response.data));
-    }
-    console.error('Request model was:', req.body.model);
+    console.error('❌ Proxy error:', error.message);
+    console.error('📋 Error details:', {
+      status: error.response?.status,
+      statusText: error.response?.statusText,
+      data: error.response?.data,
+      model: error.config?.data ? JSON.parse(error.config.data).model : 'unknown'
+    });
     
-    res.status(error.response ? error.response.status : 500).json({
+    // Enhanced error response
+    const errorMessage = error.response?.data?.detail || 
+                        error.response?.data?.error?.message || 
+                        error.message || 
+                        'Internal server error';
+    
+    res.status(error.response?.status || 500).json({
       error: {
-        message: (error.response && error.response.data && error.response.data.detail) || error.message || 'Internal server error',
+        message: `NIM API Error: ${errorMessage}`,
         type: 'invalid_request_error',
-        code: error.response ? error.response.status : 500
+        code: error.response?.status || 500,
+        details: error.response?.data
       }
     });
   }
@@ -328,5 +294,5 @@ app.listen(PORT, () => {
   console.log(`Health check: http://localhost:${PORT}/health`);
   console.log(`Reasoning display: ${SHOW_REASONING ? 'ENABLED' : 'DISABLED'}`);
   console.log(`Thinking mode: ${ENABLE_THINKING_MODE ? 'ENABLED' : 'DISABLED'}`);
-  console.log(`Timeout configured: 5 minutes for slow models`);
+  console.log(`Prefill mode: ${ENABLE_PREFILL ? 'ENABLED' : 'DISABLED'}`);
 });
