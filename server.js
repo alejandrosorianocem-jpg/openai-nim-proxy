@@ -44,10 +44,16 @@ const MODEL_MAPPING = {
   'gpt-3.5-turbo': 'nvidia/llama-3.1-nemotron-ultra-253b-v1',
   'gpt-4': 'qwen/qwen3-coder-480b-a35b-instruct',
   'gpt-4-turbo': 'moonshotai/kimi-k2.5-instruct',
+  'gpt-4-turbo-preview': 'moonshotai/kimi-k2.5-instruct', // Variante común
   'gpt-4o': 'deepseek-ai/deepseek-v3.1',
+  'gpt-4o-mini': 'meta/llama-3.1-70b-instruct',
   'claude-3-opus': 'openai/gpt-oss-120b',
   'claude-3-sonnet': 'openai/gpt-oss-20b',
-  'gemini-pro': 'qwen/qwen3-next-80b-a3b-thinking' 
+  'claude-3-5-sonnet': 'openai/gpt-oss-120b',
+  'gemini-pro': 'qwen/qwen3-next-80b-a3b-thinking',
+  // Agregar nombre directo de Kimi por si Janitor permite custom
+  'kimi-k2.5': 'moonshotai/kimi-k2.5-instruct',
+  'kimi': 'moonshotai/kimi-k2.5-instruct'
 };
 
 // Health check endpoint
@@ -80,8 +86,15 @@ app.post('/v1/chat/completions', async (req, res) => {
   try {
     const { model, messages, temperature, max_tokens, stream } = req.body;
     
+    console.log(`Received request for model: ${model}`);
+    
     // Smart model selection with fallback
     let nimModel = MODEL_MAPPING[model];
+    
+    if (nimModel) {
+      console.log(`Mapped to: ${nimModel}`);
+    } else {
+      console.log(`Model ${model} not in mapping, trying direct...`);
     if (!nimModel) {
       try {
         await axios.post(`${NIM_API_BASE}/chat/completions`, {
@@ -99,13 +112,17 @@ app.post('/v1/chat/completions', async (req, res) => {
       } catch (e) {}
       
       if (!nimModel) {
+        console.log(`Falling back to size-based selection...`);
         const modelLower = model.toLowerCase();
         if (modelLower.includes('gpt-4') || modelLower.includes('claude-opus') || modelLower.includes('405b')) {
           nimModel = 'meta/llama-3.1-405b-instruct';
+          console.log(`Selected 405B model based on name`);
         } else if (modelLower.includes('claude') || modelLower.includes('gemini') || modelLower.includes('70b')) {
           nimModel = 'meta/llama-3.1-70b-instruct';
+          console.log(`Selected 70B model based on name`);
         } else {
           nimModel = 'meta/llama-3.1-8b-instruct';
+          console.log(`Selected 8B model as default fallback`);
         }
       }
     }
